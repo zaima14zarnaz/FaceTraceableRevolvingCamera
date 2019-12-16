@@ -1,0 +1,422 @@
+# USAGE
+# python3 webstreaming.py --ip 0.0.0.0 --port 8000
+
+# import the necessary packages
+from imutils.video import VideoStream
+from flask import Response
+from flask import Flask
+from flask import render_template
+import threading
+import argparse
+import datetime
+import imutils
+import time
+import cv2
+import RPi.GPIO as GPIO          
+from time import sleep
+import matplotlib.pyplot as plt
+
+#from pad4pi import rpi_gpio
+
+GPIO.setwarnings(False) # Ignore warning for now
+GPIO.setmode(GPIO.BCM) # Use physical pin numbering
+GPIO.setup(15, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(14, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(17, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(21, GPIO.OUT)
+
+in1 = 24
+in2 = 23
+en = 25
+temp1=1
+dur = 0
+
+usingPiCamera = True
+
+frameSize = (320,240)
+
+pressed = 0
+pressed2 = 0
+pressed3 = 0
+if GPIO.input(15) == GPIO.HIGH:
+    pressed = 1
+    print("pressed")
+
+if GPIO.input(14) == GPIO.HIGH:
+    pressed2 = 1
+    print("pressed")
+
+if GPIO.input(17) == GPIO.HIGH:
+    pressed3 = 1
+    print("pressed")
+if pressed3 == 1:
+    while not(GPIO.input(17) == GPIO.LOW):
+        continue
+elif pressed3 == 0:
+    while not(GPIO.input(17) == GPIO.HIGH):
+        continue
+
+    
+GPIO.output(21,GPIO.HIGH)
+cap = VideoStream(src=0, usePiCamera=usingPiCamera, resolution=frameSize,
+		framerate=32).start()
+# Allow the camera to warm up.
+time.sleep(2.0)
+face_box = ()
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(in1,GPIO.OUT)
+GPIO.setup(in2,GPIO.OUT)
+GPIO.setup(en,GPIO.OUT)
+GPIO.output(in1,GPIO.LOW)
+GPIO.output(in2,GPIO.LOW)
+p=GPIO.PWM(en,1000)
+p.start(25)
+p.ChangeDutyCycle(0)
+turn=-1
+direc = 0
+direcp = 0
+fail = 0
+fail_cnt = 10
+face_id = 0
+
+realface_box = ()
+face_box = () 
+
+# initialize the output frame and a lock used to ensure thread-safe
+# exchanges of the output frames (useful for multiple browsers/tabs
+# are viewing tthe stream)
+outputFrame = None
+lock = threading.Lock()
+k = -1
+# initialize a flask object
+app = Flask(__name__)
+
+
+
+
+
+
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+   # set up BCM GPIO numbering  
+#to get the BCM GPIO numbering used in the following two lines, open a terminal and execute the following command: "pinout"
+
+
+"""
+FUNCTION: tracker_func
+It takes 'tracker' object and 'img' (current frame) and returns the frame with bounding box on tracking face and the tracking face info (x,y,w,h)
+"""
+def tracker_func(tracker, img):
+    # Start timer
+    direc = 0
+    direcp = 0
+    dur = 0
+    timer = cv2.getTickCount()
+ 
+    # Update tracker
+    ok, bbox = tracker.update(img)
+    print(img)
+    # Calculate Frames per second (FPS)
+    fps = cv2.getTickFrequency() / (cv2.getTickCount() - timer); # getTickFrequence - how many ticks a processor makes in a sec
+                                                                 # getTickCount - how many ticks a processor makes to do a particular task
+    
+    # Draw bounding box
+    if ok:
+        # Tracking success
+        p1 = (int(bbox[0]), int(bbox[1])) # left corner point coordinate
+        p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3])) # right corner point coordinate
+        cv2.rectangle(img, p1, p2, (255,0,0), 2, 1) # put bounding box on the tracking face
+        
+    else :
+        fail = 1
+        flag = 0
+    # Display tracker type on frame
+    cv2.putText(img, "Tracker Mode", (100,20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (50,170,50),2);
+    cv2.putText(img,'x : '+str(int(bbox[0])) , (100,40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100,255,100), 2)
+    # Display FPS on frame
+    cv2.putText(img, "FPS : " + str(int(fps)), (100,60), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (50,170,50), 2)
+    print(str(int(bbox[0])))
+    
+    turn=int(bbox[0])
+    
+    if turn < 100 :
+         print("left")
+         p.ChangeDutyCycle(30)
+         GPIO.output(in1,GPIO.HIGH)
+         GPIO.output(in2,GPIO.LOW)
+         direc = 1
+         dur = (175 - turn)*0.001142
+        
+    elif turn > 250 :
+         print("right")
+         p.ChangeDutyCycle(30)
+         GPIO.output(in1,GPIO.LOW)
+         GPIO.output(in2,GPIO.HIGH)
+         dur = (turn - 175)*0.001142
+         direc = 0
+
+    elif turn >= 100 and turn <= 250:
+        print("stop")
+        GPIO.output(in1,GPIO.LOW)
+        GPIO.output(in2,GPIO.LOW)
+    else:
+        GPIO.output(in1,GPIO.LOW)
+        GPIO.output(in2,GPIO.LOW)
+    
+    if direc == direcp:
+        sleep(dur)
+    else:
+        sleep(0.1)
+    direcp = direc
+    GPIO.output(in1,GPIO.LOW)
+    GPIO.output(in2,GPIO.LOW)
+    return [img, bbox]
+
+flag = 0 # when flag = 1, it goes to 'tracking mode'
+init = 0 # when init = 1, tracker object is already initialized
+
+#create tracker
+
+#tracker = cv2.TrackerGOTURN_create() # Goturn   
+#tracker = cv2.TrackerBoosting_create() # Boosting
+
+#tracker = cv2.TrackerMIL_create() # MIL
+#tracker = cv2.TrackerKCF_create() # KCF
+tracker = cv2.TrackerTLD_create() # TLD
+#tracker = cv2.TrackerMedianFlow_create() # MedianFlow
+#tracker = cv2.TrackerMOSSE_create() # MOSSE
+#tracker = cv2.TrackerCSRT_create() # CSRT
+
+
+# Load the cascade
+face_cascade = cv2.CascadeClassifier('/home/pi/Downloads/haarcascade_frontalface_default.xml')
+
+# To capture video from webcam.
+
+
+ 
+# Initialize mutithreading the video stream.
+
+@app.route("/")
+def index():
+	# return the rendered template
+	return render_template("index.html")
+
+def detect_motion(frameCount):
+	# grab global references to the video stream, output frame, and
+	# lock variables
+	global flag
+	global init
+	global fail_cnt
+	global fail
+	global direcp
+	global direc
+	global k
+	global dur
+	global pressed
+	global pressed2
+	flag = 0
+	init = 0
+	fail_cnt = 10
+	fail= 0
+	direcp = 0
+	direc = 0
+	k = -1
+	detect_face()
+	# initialize the motion detector and the total number of frames
+	# read thus far
+
+
+cnt = 0
+face_box_list = []
+
+# release the video stream pointer
+def end_program():
+    GPIO.output(21,GPIO.LOW)
+    cap.stop()
+        
+def detect_face():
+    global face_id
+    global flag
+    global init
+    global fail_cnt
+    global fail
+    global direcp
+    global direc
+    global k,cnt
+    global dur
+    global face_box_list
+    global face_box
+    global pressed
+    global pressed2
+    global pressed3
+    global vs, outputFrame, lock
+    key = 0
+    
+    if GPIO.input(17) == GPIO.HIGH:
+        pressed3 = 1
+        print("pressed")
+    while True: 
+        # every iteration we will work with the current frame
+        
+        # info (x,y,w,h) for all the faces in the current frame will be stored in this list
+        
+        # Read the frame
+        img = cap.read()
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Detect the faces
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4) # detectMultiScale(img_type, scale_factor, min_neighbor)
+        
+        cnt = 1 # id counter
+        
+        
+        if flag == 0:
+            # Draw the rectangle around each face
+            for (x, y, w, h) in faces:
+                face_box_list.append((x, y, w, h)) # face info will be appended in the list
+                cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2) # put bounding box on the faces
+                cv2.putText(img, 'ID '+str(cnt), (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100,255,100), 2) # put the id no with the bounding boxes
+                cv2.putText(img,'x : '+str(x) , (x, y-20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100,255,100), 2)
+                cnt += 1 # id increment
+            
+            
+            
+        else :
+         
+            if init == 0:
+                print(face_id)
+                print(len(face_box_list))
+                
+                face_box = face_box_list[face_id - 1]
+                ok = tracker.init(img, face_box) # tracker object gets initialized with the first 'face_box'
+                init = 1
+                realimg = img # current frame with bounding box on tracking face
+                realface_box = face_box
+                
+            track_info = tracker_func(tracker, img) # return pair - 1.current frame with bounding box on tracking face
+                                                        #               2. (x,y,w,h) of tracking face                                        
+            print("in loop")
+            img = track_info[0]  #current frame with bounding box on tracking face
+            face_box = track_info[1]# (x,y,w,h) of tracking face
+                                 # you've to use this 'face_box' variable to control your camera tracker device
+            if GPIO.input(17) == GPIO.HIGH and pressed3 == 0:
+                print("Goodbye")
+                break
+
+            if GPIO.input(17) == GPIO.LOW and pressed3 == 1:
+                print("Goodbye")
+                break
+    # Display
+        if fail_cnt != 0:
+            fail_cnt = fail_cnt - 1
+            cv2.putText(img,'Tracker Failure. Re-enter face' , (100,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+        cv2.imshow('img', img)
+        # Stop if escape key is pressed
+        if fail == 1:
+            fail = 0
+            flag = 0
+            fail_cnt = 10
+            continue
+        cv2.waitKey(10)
+        if GPIO.input(15) == GPIO.HIGH and pressed == 0:
+                print("Button 1 was pushed!")
+                key = 1
+
+        if GPIO.input(15) == GPIO.LOW and pressed == 1:
+                print("Button 1 was pushed!")
+                key = 1
+
+        if GPIO.input(14) == GPIO.HIGH and pressed2 == 0:
+                print("Button 2 was pushed!")
+                key = 2
+
+        if GPIO.input(14) == GPIO.LOW and pressed2 == 1:
+                print("Button 2 was pushed!")
+                key = 2
+                
+        if GPIO.input(17) == GPIO.HIGH and pressed3 == 0:
+                print("Goodbye");
+                end_program()
+                break
+
+        if GPIO.input(17) == GPIO.LOW and pressed3 == 1:
+                print("Goodbye")
+                end_program()
+                break
+        print(cnt)
+        print(face_id)
+        if key == 1 or key == 2: # only takes keys '1' to '9'
+            print("gjhg")
+            flag = 1 # tracker mode activate
+            face_id = key # ascii value for '0' is 48, so if the key is '1', face_id = 49-48 = 1 (int)
+            if face_id > cnt:
+                flag=0
+                print("meow")
+                continue
+            face_box = face_box_list[face_id - 1]
+            init = 0
+
+        with lock:
+                outputFrame = img.copy()
+
+            # acquire the lock, set the output frame, and release the
+            # lock
+            
+def generate():
+	# grab global references to the output frame and lock variables
+	global outputFrame, lock
+
+	# loop over frames from the output stream
+	while True:
+		# wait until the lock is acquired
+		with lock:
+			# check if the output frame is available, otherwise skip
+			# the iteration of the loop
+			if outputFrame is None:
+				continue
+
+			# encode the frame in JPEG format
+			(flag, encodedImage) = cv2.imencode(".jpg", outputFrame)
+
+			# ensure the frame was successfully encoded
+			if not flag:
+				continue
+
+		# yield the output frame in the byte format
+		yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
+			bytearray(encodedImage) + b'\r\n')
+
+@app.route("/video_feed")
+def video_feed():
+	return Response(generate(),
+		mimetype = "multipart/x-mixed-replace; boundary=frame")
+
+# check to see if this is the main thread of execution
+if __name__ == '__main__':
+	# construct the argument parser and parse command line arguments
+	ap = argparse.ArgumentParser()
+	#ap.add_argument("-i", "--ip", type=str, required=True,
+	#	help="ip address of the device")
+	#ap.add_argument("-o", "--port", type=int, required=True,
+	#	help="ephemeral port number of the server (1024 to 65535)")
+	ap.add_argument("-f", "--frame-count", type=int, default=32,
+		help="# of frames used to construct the background model")
+	args = vars(ap.parse_args())
+
+	# start a thread that will perform motion detection
+	t = threading.Thread(target=detect_motion, args=(
+		args["frame_count"],))
+	t.daemon = True
+	t.start()
+
+	# start the flask app
+	app.run(host="192.168.43.187", port=5000, debug=True,
+		threaded=True, use_reloader=False)
+
+
